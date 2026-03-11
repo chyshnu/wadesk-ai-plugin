@@ -49,6 +49,8 @@ async def generate_reply(chat_context):
     AI 大脑模块：接收用户的结构化 JSON 消息，调用 DeepSeek 模型返回生成的回复。
     """
     print("🧠 [AI 大脑] 正在调用 DeepSeek 模型分析 JSON 上下文...")
+
+    return "hello~~~~~~"
     
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     

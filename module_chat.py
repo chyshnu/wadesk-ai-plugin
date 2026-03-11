@@ -189,18 +189,93 @@ async def process_chat(ai_generate_func):
         }})();
         """
         await cdp_call(ws, 50, "Runtime.evaluate", {"expression": inject_js, "returnByValue": True})
-        await asyncio.sleep(0.8)
+        await asyncio.sleep(1.0) # 给一点点时间让发送按钮(纸飞机)渲染出来
 
-        find_btn_js = "(()=>{ const b=document.querySelector('#main button[aria-label=\"发送\"]'); if(!b)return null; const r=b.getBoundingClientRect(); return {x:r.x+r.width/2, y:r.y+r.height/2}; })()"
-        res = await cdp_call(ws, 51, "Runtime.evaluate", {"expression": find_btn_js, "returnByValue": True})
-        btn_coords = res.get("result", {}).get("result", {}).get("value")
+        # ==========================================
+        # 核心升级：带有闭环校验的强力发送引擎
+        # ==========================================
+        is_sent = False
+        
+        for send_attempt in range(3):  # 最多允许重试 3 次物理点击
+            # 兼容中英文 UI 的稳健按钮查找器
+            find_btn_js = """
+            (()=>{ 
+                const btn = document.querySelector('#main button[aria-label="发送"]') || 
+                            document.querySelector('#main button[aria-label="Send"]') || 
+                            document.querySelector('#main span[data-icon="send"]')?.closest('button');
+                if(!btn) return null; 
+                const r=btn.getBoundingClientRect(); 
+                return {x:r.x+r.width/2, y:r.y+r.height/2}; 
+            })()
+            """
+            res = await cdp_call(ws, 510 + send_attempt, "Runtime.evaluate", {"expression": find_btn_js, "returnByValue": True})
+            btn_coords = res.get("result", {}).get("result", {}).get("value")
 
-        if btn_coords:
-            bx, by = btn_coords['x'], btn_coords['y']
-            await cdp_call(ws, 52, "Input.dispatchMouseEvent", {"type": "mousePressed", "x": bx, "y": by, "button": "left", "clickCount": 1})
-            await cdp_call(ws, 53, "Input.dispatchMouseEvent", {"type": "mouseReleased", "x": bx, "y": by, "button": "left", "clickCount": 1})
-            print("🎉 [Chatter] 消息已成功发送！")
-            return True
-        else:
-            print("❌ [Chatter] 未找到发送按钮。")
+            if btn_coords:
+                bx, by = btn_coords['x'], btn_coords['y']
+                print(f"👉 [Chatter] 第 {send_attempt + 1} 次尝试点击发送按钮...")
+                
+                # 物理点击发送按钮
+                await cdp_call(ws, 520 + send_attempt, "Input.dispatchMouseEvent", {"type": "mousePressed", "x": bx, "y": by, "button": "left", "buttons": 1, "clickCount": 1})
+                await asyncio.sleep(0.1)
+                await cdp_call(ws, 530 + send_attempt, "Input.dispatchMouseEvent", {"type": "mouseReleased", "x": bx, "y": by, "button": "left", "buttons": 0, "clickCount": 1})
+                
+                # 开始轮询校验输入框是否清空
+                print("⏳ [Chatter] 正在进行强制状态校验 (盯盘输入框)...")
+                verify_js = """
+                (() => {
+                    const inputBox = document.querySelector('#main div[contenteditable="true"][role="textbox"]');
+                    if (!inputBox) return true; // 如果找不到框了，说明绝对发出了
+                    const text = inputBox.innerText || inputBox.textContent;
+                    return text.trim() === ""; // 只有字符串为空，才代表真发出了
+                })();
+                """
+                
+                # 每次点击后，最多等 3 秒看框有没有清空
+                for check in range(6): 
+                    await asyncio.sleep(0.5)
+                    v_res = await cdp_call(ws, 540 + send_attempt * 10 + check, "Runtime.evaluate", {"expression": verify_js, "returnByValue": True})
+                    is_cleared = v_res.get("result", {}).get("result", {}).get("value")
+                    
+                    if is_cleared:
+                        is_sent = True
+                        break # 跳出内层校验循环
+                
+                if is_sent:
+                    print("🎉 [Chatter] ✅ 校验通过！输入框已清空，确认消息已上屏！")
+                    break # 跳出外层重试循环
+                else:
+                    print("⚠️ [Chatter] ❌ 校验失败：文字仍卡在输入框，可能是幽灵点击，准备重试...")
+            else:
+                print("⏳ [Chatter] 未找到发送按钮，可能是 UI 还没反应过来...")
+                await asyncio.sleep(1)
+
+        if not is_sent:
+            print("❌ [Chatter] 致命错误：连续 3 次尝试发送均告失败，强行中断当前任务，保留现场。")
             return False
+
+        # ==========================================
+        # 步骤 E：只有确认发送成功后，才执行焦点重置
+        # ==========================================
+        print("🧹 [Chatter] 消息已妥投，正在切走焦点至置顶账号以监听新红点...")
+        reset_focus_js = """
+        (() => {
+            const firstRow = document.querySelector('#pane-side div[role="row"]');
+            if (firstRow) {
+                const rect = firstRow.getBoundingClientRect();
+                return { x: rect.x + rect.width * 0.6, y: rect.y + rect.height / 2 };
+            }
+            return null;
+        })();
+        """
+        res = await cdp_call(ws, 60, "Runtime.evaluate", {"expression": reset_focus_js, "returnByValue": True})
+        reset_coords = res.get("result", {}).get("result", {}).get("value")
+        
+        if reset_coords:
+            rx, ry = reset_coords['x'], reset_coords['y']
+            await cdp_call(ws, 61, "Input.dispatchMouseEvent", {"type": "mousePressed", "x": rx, "y": ry, "button": "left", "buttons": 1, "clickCount": 1})
+            await asyncio.sleep(0.1)
+            await cdp_call(ws, 62, "Input.dispatchMouseEvent", {"type": "mouseReleased", "x": rx, "y": ry, "button": "left", "buttons": 0, "clickCount": 1})
+            print("✅ [Chatter] 焦点已完美重置，本轮闭环安全结束。")
+            
+        return True
